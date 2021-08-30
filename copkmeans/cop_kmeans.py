@@ -1,15 +1,22 @@
 import random
+from typing import List
+
+import numpy
+from scipy.optimize import linear_sum_assignment
+from sklearn.cluster._kmeans import _tolerance
+from sklearn.metrics import normalized_mutual_info_score, adjusted_rand_score, adjusted_mutual_info_score, \
+    fowlkes_mallows_score
 
 
 # Disjoint set
-def _get_root(dad: list[int], u):
+def _get_root(dad: List[int], u):
     if dad[u] < 0:
         return u
     dad[u] = _get_root(dad, dad[u])
     return dad[u]
 
 
-def _union(dad: list[int], root_u, root_v):
+def _union(dad: List[int], root_u, root_v):
     if dad[root_u] >= 0 or dad[root_v] >= 0:
         raise Exception("Either u or v is not a tree root")
     if root_u == root_v:
@@ -49,11 +56,13 @@ def cop_kmeans(dataset, k, ml=[], cl=[], initialization='kmpp', max_iter=300, to
         cl_root[rv].add(ru)
 
     ml_info = _get_ml_info(root_2_idx, dataset)
-    tol = _tolerance(tol, dataset)
+    tol = _tolerance(dataset, tol)
 
     centers = _initialize_centers(dataset, k, initialization)
+    cls = [-1] * n
 
     for _ in range(max_iter):
+        print('\rCOP-KMeans iteration:', _ + 1, end='')
         clusters_ = [-1] * n
         for i, d in enumerate(dataset):
             if clusters_[i] == -1:
@@ -78,29 +87,33 @@ def cop_kmeans(dataset, k, ml=[], cl=[], initialization='kmpp', max_iter=300, to
                     counter += 1
 
                 if not found_cluster:
+                    print()
                     return None, None
 
         clusters_, centers_ = _compute_centers(clusters_, dataset, k, ml_info)
-        shift = sum(_l2_distance(centers[i], centers_[i]) for i in range(k))
-        if shift <= tol:
+        shift = numpy.sum((centers - centers_) ** 2)
+        if shift <= tol or _relabel(clusters_) == _relabel(cls):
             break
 
         centers = centers_
+        cls = clusters_
 
+    print()
     return clusters_, centers_
 
 
+def _relabel(cls):
+    cluster_map = {}
+    cluster_count = 0
+    for c in cls:
+        if c not in cluster_map:
+            cluster_map[c] = cluster_count
+            cluster_count += 1
+    return [cluster_map[c] for c in cls]
+
+
 def _l2_distance(point1, point2):
-    return sum([(float(i) - float(j)) ** 2 for (i, j) in zip(point1, point2)])
-
-
-# taken from scikit-learn (https://goo.gl/1RYPP5)
-def _tolerance(tol, dataset):
-    n = len(dataset)
-    dim = len(dataset[0])
-    averages = [sum(dataset[i][d] for i in range(n)) / float(n) for d in range(dim)]
-    variances = [sum((dataset[i][d] - averages[d]) ** 2 for i in range(n)) / float(n) for d in range(dim)]
-    return tol * sum(variances) / dim
+    return numpy.sum((point1 - point2) ** 2)
 
 
 def _closest_clusters(centers, datapoint):
@@ -142,27 +155,18 @@ def _compute_centers(clusters, dataset, k, ml_info):
     id_map = dict(zip(cluster_ids, range(k_new)))
     clusters = [id_map[x] for x in clusters]
 
-    dim = len(dataset[0])
-    centers = [[0.0] * dim for _ in range(k)]
-
-    counts = [0] * k_new
+    centers = numpy.zeros((k, len(dataset[0])))
+    counts = numpy.zeros((k_new))
     for j, c in enumerate(clusters):
-        for i in range(dim):
-            centers[c][i] += dataset[j][i]
+        centers[c] += dataset[j]
         counts[c] += 1
-
     for j in range(k_new):
-        for i in range(dim):
-            centers[j][i] = centers[j][i] / float(counts[j])
+        centers[j] /= counts[j]
 
     if k_new < k:
         ml_groups, ml_scores, ml_centroids = ml_info
-        current_scores = [sum(_l2_distance(centers[clusters[i]], dataset[i])
-                              for i in group)
-                          for group in ml_groups]
-        group_ids = sorted(range(len(ml_groups)),
-                           key=lambda x: current_scores[x] - ml_scores[x],
-                           reverse=True)
+        current_scores = [sum(_l2_distance(centers[clusters[i]], dataset[i]) for i in group) for group in ml_groups]
+        group_ids = sorted(range(len(ml_groups)), key=lambda x: current_scores[x] - ml_scores[x], reverse=True)
 
         for j in range(k - k_new):
             gid = group_ids[j]
@@ -176,30 +180,50 @@ def _compute_centers(clusters, dataset, k, ml_info):
 
 def _get_ml_info(root_2_idx, dataset):
     groups = list(root_2_idx.values())
-    dim = len(dataset[0])
-    centroids = [[0.0] * dim for _ in range(len(groups))]
+    centroids = numpy.zeros((len(groups), len(dataset[0])))
 
     for j, group in enumerate(groups):
-        for d in range(dim):
-            for i in group:
-                centroids[j][d] += dataset[i][d]
-            centroids[j][d] /= float(len(group))
+        for i in group:
+            centroids[j] += dataset[i]
+        centroids[j] /= float(len(group))
 
-    scores = [sum(_l2_distance(centroids[j], dataset[i])
-                  for i in groups[j])
-              for j in range(len(groups))]
+    scores = [sum(_l2_distance(centroids[j], dataset[i]) for i in group) for j, group in enumerate(groups)]
 
     return groups, scores, centroids
 
 
+def get_clustering_quality(labels_true, labels_pred):
+    quality = {
+        'NMI': normalized_mutual_info_score(labels_true, labels_pred),
+        'ARI': adjusted_rand_score(labels_true, labels_pred),
+        'AMI': adjusted_mutual_info_score(labels_true, labels_pred),
+        'FMI': fowlkes_mallows_score(labels_true, labels_pred),
+    }
+
+    # Accuracy
+    m_labels = set(labels_true)
+    n_labels = set(labels_pred)
+    cost_matrix = numpy.ndarray((len(m_labels), len(n_labels)))
+    for i, u in enumerate(m_labels):
+        for j, v in enumerate(n_labels):
+            cost_matrix[i][j] = \
+                len(set([x for x, _ in enumerate(labels_true) if _ == u]).intersection(
+                    [x for x, _ in enumerate(labels_pred) if _ == v]))
+
+    row_ind, col_ind = linear_sum_assignment(cost_matrix, maximize=True)
+    quality['ACC'] = cost_matrix[row_ind, col_ind].sum() / len(labels_true)
+
+    return quality
+
+
 if __name__ == '__main__':
-    dataset = [
+    dataset = numpy.asarray([
         (1, 2),
         (1, 2),
         (1, 2),
         (4, 5),
         (5, 6)
-    ]
+    ])
     clusters, _ = cop_kmeans(dataset, 3, ml=[(0, 4), (1, 2), (0, 3)], cl=[(0, 2)])
 
     print(clusters)
