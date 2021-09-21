@@ -29,7 +29,7 @@ def _union(dad: List[int], root_u, root_v):
         dad[root_u] = root_v
 
 
-def cop_kmeans(dataset, k, ml=[], cl=[], initialization='kmpp', max_iter=300, tol=1e-4):
+def cop_kmeans(dataset, k, ml=[], cl=[], initialization='kmpp', max_iter=100, tol=1e-4):
     n = len(dataset)
     dad = [-1] * n
     for u, v in ml:
@@ -129,28 +129,28 @@ def _initialize_centers(dataset, k, method):
         return [dataset[i] for i in ids[:k]]
 
     elif method == 'kmpp':
-        chances = [1] * len(dataset)
+        chances_raw = numpy.asarray([1.0] * len(dataset))
         centers = []
-
-        for _ in range(k):
-            chances = [x / sum(chances) for x in chances]
+        for it in range(k):
+            chances = chances_raw / numpy.sum(chances_raw)
             r = random.random()
             acc = 0.0
             for index, chance in enumerate(chances):
-                if acc + chance >= r:
-                    break
                 acc += chance
+                if acc >= r:
+                    break
             centers.append(dataset[index])
 
             for index, point in enumerate(dataset):
-                cids, distances = _closest_clusters(centers, point)
-                chances[index] = distances[cids[0]]
+                d = _l2_distance(point, centers[-1])
+                if it == 0 or chances_raw[index] > d:
+                    chances_raw[index] = d
 
         return centers
 
 
 def _compute_centers(clusters, dataset, k, ml_info):
-    cluster_ids = set(clusters)
+    cluster_ids = dict.fromkeys(clusters)
     k_new = len(cluster_ids)
     id_map = dict(zip(cluster_ids, range(k_new)))
     clusters = [id_map[x] for x in clusters]
@@ -194,10 +194,10 @@ def _get_ml_info(root_2_idx, dataset):
 
 def get_clustering_quality(labels_true, labels_pred):
     quality = {
-        'NMI': normalized_mutual_info_score(labels_true, labels_pred),
-        'ARI': adjusted_rand_score(labels_true, labels_pred),
-        'AMI': adjusted_mutual_info_score(labels_true, labels_pred),
-        'FMI': fowlkes_mallows_score(labels_true, labels_pred),
+        'NMI': round(normalized_mutual_info_score(labels_true, labels_pred), 3),
+        'ARI': round(adjusted_rand_score(labels_true, labels_pred), 3),
+        # 'AMI': round(adjusted_mutual_info_score(labels_true, labels_pred), 3),
+        # 'FMI': round(fowlkes_mallows_score(labels_true, labels_pred), 3),
     }
 
     # Accuracy
@@ -211,7 +211,7 @@ def get_clustering_quality(labels_true, labels_pred):
                     [x for x, _ in enumerate(labels_pred) if _ == v]))
 
     row_ind, col_ind = linear_sum_assignment(cost_matrix, maximize=True)
-    quality['ACC'] = cost_matrix[row_ind, col_ind].sum() / len(labels_true)
+    quality['ACC'] = round(cost_matrix[row_ind, col_ind].sum() / len(labels_true), 3)
 
     return quality
 
